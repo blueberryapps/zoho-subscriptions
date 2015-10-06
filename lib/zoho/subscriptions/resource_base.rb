@@ -9,13 +9,19 @@ module Zoho
       config_accessor :resource_name
 
       class << self
+        def inherited(resource)
+          resource.configure do |config|
+            config.resource_name = resource.name.gsub("Zoho::Subscriptions::", "").underscore
+          end
+        end
+
         def resource_attributes(*attribute_names)
           @attribute_names = attribute_names
           attr_accessor *attribute_names
         end
 
-        def all
-          response = Client.get "/#{pluralized_resource_name}"
+        def all(filter = {})
+          response = Client.get "/#{pluralized_resource_name}", query: filter
 
           case response.code
           when 200
@@ -50,14 +56,7 @@ module Zoho
         end
 
         def update(id, attributes)
-          response = Client.put "#{resource_path}/#{id}", body: attributes.to_json
-
-          case response.code
-          when 200
-            response[resource_name].slice(*attribute_names.map(&:to_s))
-          else
-            unexpected_response response
-          end
+          custom_request :put, "#{resource_path}/#{id}", body: attributes.to_json
         end
 
         def destroy(id)
@@ -66,20 +65,49 @@ module Zoho
           unexpected_response response unless response.code == 200
         end
 
-        def resource_id
-          :"#{resource_name}_id"
-        end
-
-        private
-
-        attr_reader :attribute_names
-
         def resource_path
           "/#{pluralized_resource_name}"
         end
 
-        def pluralized_resource_name
-          resource_name.pluralize
+        def resource_id
+          :"#{resource_name}_id"
+        end
+
+        def custom_request(http_method, api_path, http_options)
+          response = Client.send http_method, api_path, http_options
+
+          case response.code
+          when 200, 201
+            response[resource_name].slice(*attribute_names.map(&:to_s))
+          else
+            unexpected_response response
+          end
+        end
+
+        def custom_action(action_name, http_method:, send_params_through: :body)
+          unless [:get, :post, :put, :delete].include? http_method
+            raise ArgumentError, "unsupported HTTP method: #{http_method}"
+          end
+
+          unless [:query, :body].include? send_params_through
+            raise ArgumentError, "unsupported params method: #{send_params_through}"
+          end
+
+          define_method action_name do |**params|
+            formatted_params = if send_params_through == :body
+                                 params.to_json
+                               else
+                                 params
+                               end
+
+            new_attributes = custom_request http_method,
+                                            "#{resource_path}/#{action_name}",
+                                            send_params_through => formatted_params
+
+            new_attributes.each do |attribute_name, value|
+              public_send "#{attribute_name}=", value
+            end
+          end
         end
 
         def unexpected_response(response)
@@ -95,12 +123,20 @@ module Zoho
           when 500
             raise Errors::InternalServerError
           else
-            raise Errors::Error, "unexpected response code: #{code}"
+            raise Errors::Error, "unexpected response code: #{response.code}"
           end
+        end
+
+        private
+
+        attr_reader :attribute_names
+
+        def pluralized_resource_name
+          resource_name.pluralize
         end
       end
 
-      delegate :resource_id, to: :"self.class"
+      delegate :resource_id, :custom_request, to: :"self.class"
 
       def id
         public_send resource_id
@@ -125,6 +161,10 @@ module Zoho
 
       def destroy
         self.class.destroy id
+      end
+
+      def resource_path
+        "#{self.class.resource_path}/#{id}"
       end
     end
   end
